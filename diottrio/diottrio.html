@@ -572,7 +572,7 @@
 				makeHiddenVideo(video2);
 				panelCombined.appendChild(video2);
 
-				video2.addEventListener('loadedmetadata', () => {
+				video2.addEventListener('loadeddata', () => {
 					const canvas = document.createElement('canvas');
 					canvas.width = video2.videoWidth;
 					canvas.height = video2.videoHeight;
