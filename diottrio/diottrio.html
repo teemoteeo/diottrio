@@ -582,68 +582,37 @@
 			render();
 		}
 
-		async function initCamera() {
-			try {
-				mediaStream = await navigator.mediaDevices.getUserMedia({
-					video: { width: { ideal: 1920 }, height: { ideal: 1080 } }
-				});
+	async function initCamera() {
+		try {
+			mediaStream = await navigator.mediaDevices.getUserMedia({
+				video: { width: { ideal: 1920 }, height: { ideal: 1080 } }
+			});
 
-				const video1 = createVideoElement(mediaStream, true);
+			const video1 = createVideoElement(mediaStream, true);
+			const video2 = createVideoElement(mediaStream, true);
 
-				setupPanel(panelClear, video1, true);
+			setupPanel(panelClear, video1, true);
+			setupPanel(panelCombined, video2, true);
 
-				// Wait for video to have valid dimensions before creating canvas
-				let canvasSetupDone = false;
-				const setupCanvas = () => {
-					if (canvasSetupDone) return; // Only run once
+			console.log('Both video elements set up - testing CSS blur filter');
 
-					console.log('setupCanvas called, readyState:', video1.readyState, 'dimensions:', video1.videoWidth, 'x', video1.videoHeight);
-
-					if (video1.videoWidth > 0 && video1.videoHeight > 0) {
-						canvasSetupDone = true;
-						const canvas = document.createElement('canvas');
-						canvas.width = video1.videoWidth;
-						canvas.height = video1.videoHeight;
-						canvas.style.display = 'block'; // Ensure canvas is visible
-						console.log('Canvas created with dimensions:', canvas.width, 'x', canvas.height);
-						setupPanel(panelCombined, canvas, true, false);
-						console.log('Canvas appended to DOM');
-						// Test: try drawing one frame immediately
-						setTimeout(() => {
-							console.log('Test draw - video readyState:', video1.readyState, 'paused:', video1.paused);
-							const ctx = canvas.getContext('2d');
-							ctx.fillStyle = 'red';
-							ctx.fillRect(0, 0, 100, 100); // Draw red square as test
-							console.log('Red square drawn');
-							setTimeout(() => {
-								try {
-									ctx.drawImage(video1, 0, 0, canvas.width, canvas.height);
-									console.log('Successfully drew video frame to canvas');
-								} catch (e) {
-									console.error('Failed to draw video:', e);
-								}
-							}, 500);
-						}, 100);
-
-						startBlurRender(video1, canvas);
-						console.log('Blur rendering started');
-					} else {
-						// Retry if dimensions not ready yet
-						console.log('Retrying... dimensions not ready');
-						requestAnimationFrame(setupCanvas);
-					}
-				};
-
-				video1.addEventListener('loadedmetadata', setupCanvas);
-				video1.addEventListener('loadeddata', setupCanvas);
-				video1.addEventListener('playing', setupCanvas);
-
-				sourceStatus.textContent = 'Source: Device Camera';
-			} catch (err) {
-				console.log('Camera not available, using fallback video:', err.message);
-				useFallbackVideo();
+			// Apply blur filter directly to video2 using CSS
+			function updateVideoBlur() {
+				const blurPx = calculateBinocularBlur();
+				video2.style.filter = `blur(${blurPx}px)`;
+				console.log('Applied blur:', blurPx, 'px');
 			}
+
+			// Update blur when sliders change
+			updateVideoBlur();
+			window.updateBinocularVision = updateVideoBlur;
+
+			sourceStatus.textContent = 'Source: Device Camera';
+		} catch (err) {
+			console.log('Camera not available, using fallback video:', err.message);
+			useFallbackVideo();
 		}
+	}
 
 		function handleVideoError(panel, panelName) {
 			panel.innerHTML = `<div class="loading-state">Video failed to load</div>`;
@@ -676,7 +645,7 @@
 			isDominantLeft = isLeft;
 			dominantLeftBtn.classList.toggle('active', isLeft);
 			dominantRightBtn.classList.toggle('active', !isLeft);
-			updateBinocularVision();
+			if (window.updateBinocularVision) window.updateBinocularVision();
 		}
 
 		function init() {
@@ -686,11 +655,13 @@
 			diopterLeftSlider.addEventListener('input', (e) => {
 				leftDiopters = parseFloat(e.target.value);
 				updateEyeDisplay(diopterLeftDisplay, leftDiopters);
+				if (window.updateBinocularVision) window.updateBinocularVision();
 			});
 
 			diopterRightSlider.addEventListener('input', (e) => {
 				rightDiopters = parseFloat(e.target.value);
 				updateEyeDisplay(diopterRightDisplay, rightDiopters);
+				if (window.updateBinocularVision) window.updateBinocularVision();
 			});
 
 			dominantLeftBtn.addEventListener('click', () => setDominantEye(true));
