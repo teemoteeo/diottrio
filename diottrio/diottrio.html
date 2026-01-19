@@ -565,31 +565,31 @@
 				});
 
 				const video1 = createVideoElement(mediaStream, true);
-				const video2 = createVideoElement(mediaStream, true);
 
 				setupPanel(panelClear, video1, true);
 
-				makeHiddenVideo(video2);
-				panelCombined.appendChild(video2);
-
 				// Wait for video to have valid dimensions before creating canvas
 				const setupCanvas = () => {
-					if (video2.videoWidth > 0 && video2.videoHeight > 0) {
+					console.log('setupCanvas called, readyState:', video1.readyState, 'dimensions:', video1.videoWidth, 'x', video1.videoHeight);
+
+					if (video1.videoWidth > 0 && video1.videoHeight > 0) {
 						const canvas = document.createElement('canvas');
-						canvas.width = video2.videoWidth;
-						canvas.height = video2.videoHeight;
-						console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
-						setupPanel(panelCombined, canvas, true, true);
-						startBlurRender(video2, canvas);
+						canvas.width = video1.videoWidth;
+						canvas.height = video1.videoHeight;
+						console.log('Canvas created with dimensions:', canvas.width, 'x', canvas.height);
+						setupPanel(panelCombined, canvas, true, false);
+						startBlurRender(video1, canvas);
+						console.log('Blur rendering started');
 					} else {
 						// Retry if dimensions not ready yet
-						console.log('Waiting for video dimensions...', video2.videoWidth, 'x', video2.videoHeight);
+						console.log('Retrying... dimensions not ready');
 						requestAnimationFrame(setupCanvas);
 					}
 				};
 
-				video2.addEventListener('loadedmetadata', setupCanvas);
-				video2.addEventListener('playing', setupCanvas);
+				video1.addEventListener('loadedmetadata', setupCanvas);
+				video1.addEventListener('loadeddata', setupCanvas);
+				video1.addEventListener('playing', setupCanvas);
 
 				sourceStatus.textContent = 'Source: Device Camera';
 			} catch (err) {
