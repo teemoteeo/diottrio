@@ -473,7 +473,6 @@
 		const DEPTH_SLICES = 5;
 		const DEPTH_FRAME_SKIP = 3; // Process depth every N frames
 		const NEAR_THRESHOLD = 0.3;
-		const FAR_THRESHOLD = 0.7;
 		const DEPTH_BLUR_BASE = 8.0;
 
 		// DOM references
@@ -486,6 +485,7 @@
 		const dominantLeftBtn = document.getElementById('dominant-left');
 		const dominantRightBtn = document.getElementById('dominant-right');
 		const sourceStatus = document.getElementById('source-status');
+		const fpsCounter = document.getElementById('fps-counter');
 
 		let mediaStream = null;
 		let leftDiopters = 0;
@@ -499,6 +499,15 @@
 		let frameCount = 0;
 		let useDepthEstimation = false;
 		let lastDepthUpdate = 0;
+
+		// Cached canvas resources (prevent memory leaks)
+		let cachedMaskCanvases = [];
+		let cachedMaskContexts = [];
+		let cachedTempCanvas = null;
+		let cachedTempContext = null;
+		let cachedMainContext = null;
+		let cachedCanvasWidth = 0;
+		let cachedCanvasHeight = 0;
 
 		// FPS tracking
 		let fpsFrameCount = 0;
@@ -557,37 +566,31 @@
 
 				// Get the depth tensor and convert to normalized values
 				const depthTensor = depthData.toTensor();
-				depthMap = await depthTensor.data();
+				const data = await depthTensor.data();
 				depthTensor.dispose();
 
-				return depthMap;
+				return data;
 			} catch (error) {
 				console.log('Depth estimation failed:', error.message);
 				return null;
 			}
 		}
 
-		// Create depth mask for a specific depth slice
-		function createDepthMask(depthData, width, height, minDepth, maxDepth) {
-			const maskCanvas = document.createElement('canvas');
-			maskCanvas.width = width;
-			maskCanvas.height = height;
-			const maskCtx = maskCanvas.getContext('2d');
+		// Create depth mask for a specific depth slice (uses cached canvases)
+		function createDepthMask(depthData, width, height, minDepth, maxDepth, sliceIndex) {
+			const maskCanvas = cachedMaskCanvases[sliceIndex];
+			const maskCtx = cachedMaskContexts[sliceIndex];
 			const imageData = maskCtx.createImageData(width, height);
+
+			// Use Uint32Array for faster pixel operations (write all 4 channels at once)
+			const data32 = new Uint32Array(imageData.data.buffer);
+			const white = 0xFFFFFFFF; // ABGR: opaque white
+			const transparent = 0x00000000;
 
 			for (let i = 0; i < depthData.length; i++) {
 				const depth = depthData[i];
-				const pixelIndex = i * 4;
-
-				// Alpha mask: 255 if depth is in range, 0 otherwise
-				if (depth >= minDepth && depth < maxDepth) {
-					imageData.data[pixelIndex] = 255;
-					imageData.data[pixelIndex + 1] = 255;
-					imageData.data[pixelIndex + 2] = 255;
-					imageData.data[pixelIndex + 3] = 255;
-				} else {
-					imageData.data[pixelIndex + 3] = 0;
-				}
+				// Write all 4 channels at once using Uint32Array
+				data32[i] = (depth >= minDepth && depth < maxDepth) ? white : transparent;
 			}
 
 			maskCtx.putImageData(imageData, 0, 0);
@@ -617,10 +620,41 @@
 			return Math.max(0, Math.min(blurAmount, 50)); // Clamp between 0 and 50px
 		}
 
-		// Apply depth-aware blur using layered rendering
+		// Initialize cached canvases (called once or when size changes)
+		function initializeCachedCanvases(width, height) {
+			// Check if we need to resize
+			if (cachedCanvasWidth === width && cachedCanvasHeight === height && cachedMaskCanvases.length > 0) {
+				return; // Already initialized with correct size
+			}
+
+			cachedCanvasWidth = width;
+			cachedCanvasHeight = height;
+
+			// Create mask canvases for each depth slice
+			cachedMaskCanvases = [];
+			cachedMaskContexts = [];
+			for (let i = 0; i < DEPTH_SLICES; i++) {
+				const canvas = document.createElement('canvas');
+				canvas.width = width;
+				canvas.height = height;
+				cachedMaskCanvases.push(canvas);
+				cachedMaskContexts.push(canvas.getContext('2d', { willReadFrequently: false }));
+			}
+
+			// Create temp canvas for blurred video
+			cachedTempCanvas = document.createElement('canvas');
+			cachedTempCanvas.width = width;
+			cachedTempCanvas.height = height;
+			cachedTempContext = cachedTempCanvas.getContext('2d', { willReadFrequently: false });
+		}
+
+		// Apply depth-aware blur using layered rendering (uses cached canvases)
 		function applyDepthAwareBlur(video, canvas, depthData, diopters) {
-			const ctx = canvas.getContext('2d');
-			if (!ctx || !depthData) {
+			if (!cachedMainContext) {
+				cachedMainContext = canvas.getContext('2d', { willReadFrequently: false });
+			}
+
+			if (!cachedMainContext || !depthData) {
 				// Fallback to uniform blur
 				applySimpleBlur(video, canvas, calculateBlur(diopters));
 				return;
@@ -629,14 +663,11 @@
 			const width = canvas.width;
 			const height = canvas.height;
 
-			// Clear canvas
-			ctx.clearRect(0, 0, width, height);
+			// Initialize or resize cached canvases if needed
+			initializeCachedCanvases(width, height);
 
-			// Create temporary canvas for each layer
-			const tempCanvas = document.createElement('canvas');
-			tempCanvas.width = width;
-			tempCanvas.height = height;
-			const tempCtx = tempCanvas.getContext('2d');
+			// Clear canvas
+			cachedMainContext.clearRect(0, 0, width, height);
 
 			// Render in depth slices (5 layers)
 			for (let i = 0; i < DEPTH_SLICES; i++) {
@@ -647,25 +678,25 @@
 				// Calculate blur for this depth slice
 				const blurPx = calculateDepthBlur(avgDepth, diopters);
 
-				// Draw video with blur
-				tempCtx.clearRect(0, 0, width, height);
-				tempCtx.filter = `blur(${blurPx}px)`;
-				tempCtx.drawImage(video, 0, 0, width, height);
-				tempCtx.filter = 'none';
+				// Draw video with blur to temp canvas
+				cachedTempContext.clearRect(0, 0, width, height);
+				cachedTempContext.filter = `blur(${blurPx}px)`;
+				cachedTempContext.drawImage(video, 0, 0, width, height);
+				cachedTempContext.filter = 'none';
 
 				// Create depth mask for this slice
-				const mask = createDepthMask(depthData, width, height, minDepth, maxDepth);
+				const mask = createDepthMask(depthData, width, height, minDepth, maxDepth, i);
 
 				// Composite masked layer onto main canvas
-				ctx.save();
-				ctx.globalCompositeOperation = 'source-over';
+				cachedMainContext.save();
+				cachedMainContext.globalCompositeOperation = 'source-over';
 
 				// Use mask to only draw pixels in this depth range
-				ctx.drawImage(mask, 0, 0);
-				ctx.globalCompositeOperation = 'source-in';
-				ctx.drawImage(tempCanvas, 0, 0);
-				ctx.globalCompositeOperation = 'source-over';
-				ctx.restore();
+				cachedMainContext.drawImage(mask, 0, 0);
+				cachedMainContext.globalCompositeOperation = 'source-in';
+				cachedMainContext.drawImage(cachedTempCanvas, 0, 0);
+				cachedMainContext.globalCompositeOperation = 'source-over';
+				cachedMainContext.restore();
 			}
 		}
 
@@ -684,7 +715,6 @@
 				fpsFrameCount = 0;
 				fpsLastTime = now;
 
-				const fpsCounter = document.getElementById('fps-counter');
 				if (fpsCounter) {
 					fpsCounter.textContent = `FPS: ${currentFPS}`;
 					fpsCounter.classList.toggle('low', currentFPS < 30);
@@ -934,6 +964,10 @@
 			}
 			if (mediaStream) {
 				mediaStream.getTracks().forEach(track => track.stop());
+			}
+			// Dispose TensorFlow.js resources
+			if (depthEstimator && depthEstimator.dispose) {
+				depthEstimator.dispose();
 			}
 		});
 
