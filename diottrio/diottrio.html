@@ -561,7 +561,7 @@
 		async function initCamera() {
 			try {
 				mediaStream = await navigator.mediaDevices.getUserMedia({
-					video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'environment' }
+					video: { width: { ideal: 1920 }, height: { ideal: 1080 } }
 				});
 
 				const video1 = createVideoElement(mediaStream, true);
@@ -572,13 +572,24 @@
 				makeHiddenVideo(video2);
 				panelCombined.appendChild(video2);
 
-				video2.addEventListener('loadeddata', () => {
-					const canvas = document.createElement('canvas');
-					canvas.width = video2.videoWidth;
-					canvas.height = video2.videoHeight;
-					setupPanel(panelCombined, canvas, true, true);
-					startBlurRender(video2, canvas);
-				});
+				// Wait for video to have valid dimensions before creating canvas
+				const setupCanvas = () => {
+					if (video2.videoWidth > 0 && video2.videoHeight > 0) {
+						const canvas = document.createElement('canvas');
+						canvas.width = video2.videoWidth;
+						canvas.height = video2.videoHeight;
+						console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
+						setupPanel(panelCombined, canvas, true, true);
+						startBlurRender(video2, canvas);
+					} else {
+						// Retry if dimensions not ready yet
+						console.log('Waiting for video dimensions...', video2.videoWidth, 'x', video2.videoHeight);
+						requestAnimationFrame(setupCanvas);
+					}
+				};
+
+				video2.addEventListener('loadedmetadata', setupCanvas);
+				video2.addEventListener('playing', setupCanvas);
 
 				sourceStatus.textContent = 'Source: Device Camera';
 			} catch (err) {
