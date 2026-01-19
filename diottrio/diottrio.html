@@ -497,6 +497,8 @@
 			Object.assign(video, { autoplay: true, playsInline: true, muted: true, loop: true });
 			if (isStream) {
 				video.srcObject = src;
+			// Explicitly play the stream (don't rely on autoplay on Mac)
+			video.play().catch(e => console.log('Stream play error:', e));
 			} else {
 				video.src = src;
 				video.play().catch(e => console.log('Video play error:', e));
@@ -510,6 +512,18 @@
 
 		function applySimpleBlur(video, canvas, blurAmount) {
 			const ctx = canvas.getContext('2d');
+			if (!ctx) {
+				console.error('Failed to get canvas context');
+				return;
+			}
+
+			// Debug: log first few frames
+			if (!window.frameCount) window.frameCount = 0;
+			if (window.frameCount < 5) {
+				console.log('Frame', window.frameCount, '- video ready:', video.readyState, 'blur:', blurAmount, 'canvas:', canvas.width, 'x', canvas.height);
+				window.frameCount++;
+			}
+
 			ctx.filter = `blur(${blurAmount}px)`;
 			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 			ctx.filter = 'none';
@@ -548,10 +562,20 @@
 		}
 
 		function startBlurRender(video, canvas) {
+			console.log('startBlurRender called with video:', video, 'canvas:', canvas);
+			let renderCount = 0;
+
 			function render() {
+				if (renderCount < 3) {
+					console.log('Render loop', renderCount, '- readyState:', video.readyState, 'HAVE_CURRENT_DATA:', video.HAVE_CURRENT_DATA);
+					renderCount++;
+				}
+
 				if (video.readyState >= video.HAVE_CURRENT_DATA) {
 					const blurPx = calculateBinocularBlur();
 					applySimpleBlur(video, canvas, blurPx);
+				} else if (renderCount < 3) {
+					console.log('Video not ready yet, skipping frame');
 				}
 				animationFrameId = requestAnimationFrame(render);
 			}
@@ -569,15 +593,38 @@
 				setupPanel(panelClear, video1, true);
 
 				// Wait for video to have valid dimensions before creating canvas
+				let canvasSetupDone = false;
 				const setupCanvas = () => {
+					if (canvasSetupDone) return; // Only run once
+
 					console.log('setupCanvas called, readyState:', video1.readyState, 'dimensions:', video1.videoWidth, 'x', video1.videoHeight);
 
 					if (video1.videoWidth > 0 && video1.videoHeight > 0) {
+						canvasSetupDone = true;
 						const canvas = document.createElement('canvas');
 						canvas.width = video1.videoWidth;
 						canvas.height = video1.videoHeight;
+						canvas.style.display = 'block'; // Ensure canvas is visible
 						console.log('Canvas created with dimensions:', canvas.width, 'x', canvas.height);
 						setupPanel(panelCombined, canvas, true, false);
+						console.log('Canvas appended to DOM');
+						// Test: try drawing one frame immediately
+						setTimeout(() => {
+							console.log('Test draw - video readyState:', video1.readyState, 'paused:', video1.paused);
+							const ctx = canvas.getContext('2d');
+							ctx.fillStyle = 'red';
+							ctx.fillRect(0, 0, 100, 100); // Draw red square as test
+							console.log('Red square drawn');
+							setTimeout(() => {
+								try {
+									ctx.drawImage(video1, 0, 0, canvas.width, canvas.height);
+									console.log('Successfully drew video frame to canvas');
+								} catch (e) {
+									console.error('Failed to draw video:', e);
+								}
+							}, 500);
+						}, 100);
+
 						startBlurRender(video1, canvas);
 						console.log('Blur rendering started');
 					} else {
