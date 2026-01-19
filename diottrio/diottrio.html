@@ -7,9 +7,6 @@
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-	<!-- TensorFlow.js and Depth Estimation -->
-	<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
-	<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/depth-estimation@0.0.5/dist/depth-estimation.min.js"></script>
 	<style>
 		* {
 			margin: 0;
@@ -324,15 +321,6 @@
 			letter-spacing: 0.15em;
 		}
 
-		.fps-counter {
-			color: #34c759;
-			font-weight: 700;
-		}
-
-		.fps-counter.low {
-			color: var(--accent);
-		}
-
 		@media (max-width: 1200px) {
 			.vision-comparison {
 				grid-template-columns: 1fr;
@@ -459,7 +447,6 @@
 	<footer>
 		<span>Simulation only — not medical advice</span>
 		<span id="source-status">Detecting camera...</span>
-		<span class="fps-counter" id="fps-counter">FPS: --</span>
 	</footer>
 
 	<script>
@@ -468,12 +455,6 @@
 		const DOMINANT_WEIGHT = 0.65;
 		const BLUR_BASE = 1.4;
 		const BLUR_EXPONENT = 1.1;
-
-		// Depth-aware blur configuration
-		const DEPTH_SLICES = 5;
-		const DEPTH_FRAME_SKIP = 3; // Process depth every N frames
-		const NEAR_THRESHOLD = 0.3;
-		const DEPTH_BLUR_BASE = 8.0;
 
 		// DOM references
 		const panelClear = document.getElementById('panel-clear');
@@ -485,34 +466,12 @@
 		const dominantLeftBtn = document.getElementById('dominant-left');
 		const dominantRightBtn = document.getElementById('dominant-right');
 		const sourceStatus = document.getElementById('source-status');
-		const fpsCounter = document.getElementById('fps-counter');
 
 		let mediaStream = null;
 		let leftDiopters = 0;
 		let rightDiopters = 0;
 		let isDominantLeft = true;
 		let animationFrameId = null;
-
-		// Depth estimation state
-		let depthEstimator = null;
-		let depthMap = null;
-		let frameCount = 0;
-		let useDepthEstimation = false;
-		let lastDepthUpdate = 0;
-
-		// Cached canvas resources (prevent memory leaks)
-		let cachedMaskCanvases = [];
-		let cachedMaskContexts = [];
-		let cachedTempCanvas = null;
-		let cachedTempContext = null;
-		let cachedMainContext = null;
-		let cachedCanvasWidth = 0;
-		let cachedCanvasHeight = 0;
-
-		// FPS tracking
-		let fpsFrameCount = 0;
-		let fpsLastTime = performance.now();
-		let currentFPS = 0;
 
 		function calculateBlur(diopters) {
 			return diopters === 0 ? 0 : BLUR_BASE * Math.pow(diopters, BLUR_EXPONENT);
@@ -529,197 +488,8 @@
 			// The render loop will pick up the new blur values automatically
 		}
 
-		// Initialize depth estimation model
-		async function initDepthModel() {
-			try {
-				if (!window.depthEstimation) {
-					console.log('Depth estimation library not loaded, using fallback');
-					return;
-				}
-
-				console.log('Initializing depth estimation model...');
-				const model = depthEstimation.SupportedModels.ARPortraitDepth;
-				const estimatorConfig = {
-					outputDepthRange: [0, 1]
-				};
-
-				depthEstimator = await depthEstimation.createEstimator(model, estimatorConfig);
-				useDepthEstimation = true;
-				console.log('Depth estimation model initialized successfully');
-			} catch (error) {
-				console.log('Failed to initialize depth model, using uniform blur:', error.message);
-				useDepthEstimation = false;
-			}
-		}
-
-		// Extract depth map from video
-		async function getDepthMap(video) {
-			if (!depthEstimator || !useDepthEstimation) {
-				return null;
-			}
-
-			try {
-				const depthData = await depthEstimator.estimateDepth(video);
-				if (!depthData || !depthData.toCanvasImageSource) {
-					return null;
-				}
-
-				// Get the depth tensor and convert to normalized values
-				const depthTensor = depthData.toTensor();
-				const data = await depthTensor.data();
-				depthTensor.dispose();
-
-				return data;
-			} catch (error) {
-				console.log('Depth estimation failed:', error.message);
-				return null;
-			}
-		}
-
-		// Create depth mask for a specific depth slice (uses cached canvases)
-		function createDepthMask(depthData, width, height, minDepth, maxDepth, sliceIndex) {
-			const maskCanvas = cachedMaskCanvases[sliceIndex];
-			const maskCtx = cachedMaskContexts[sliceIndex];
-			const imageData = maskCtx.createImageData(width, height);
-
-			// Use Uint32Array for faster pixel operations (write all 4 channels at once)
-			const data32 = new Uint32Array(imageData.data.buffer);
-			const white = 0xFFFFFFFF; // ABGR: opaque white
-			const transparent = 0x00000000;
-
-			for (let i = 0; i < depthData.length; i++) {
-				const depth = depthData[i];
-				// Write all 4 channels at once using Uint32Array
-				data32[i] = (depth >= minDepth && depth < maxDepth) ? white : transparent;
-			}
-
-			maskCtx.putImageData(imageData, 0, 0);
-			return maskCanvas;
-		}
-
-		// Calculate blur amount based on depth and diopters
-		function calculateDepthBlur(depth, diopters) {
-			if (diopters === 0 || depth < NEAR_THRESHOLD) {
-				return 0; // Sharp for near objects or no myopia
-			}
-
-			// Focal distance in meters (1 / diopters)
-			const focalDist = 1 / diopters;
-
-			// Estimate object distance from depth (assuming depth of 1 = 5 meters)
-			const objectDist = depth * 5.0;
-
-			// Blur formula: blurPx = (objectDist - focalDist) / focalDist * BLUR_BASE * diopters^0.8
-			if (objectDist <= focalDist) {
-				return 0; // Object is within focal distance, sharp
-			}
-
-			const relativeDistance = (objectDist - focalDist) / focalDist;
-			const blurAmount = relativeDistance * DEPTH_BLUR_BASE * Math.pow(diopters, 0.8);
-
-			return Math.max(0, Math.min(blurAmount, 50)); // Clamp between 0 and 50px
-		}
-
-		// Initialize cached canvases (called once or when size changes)
-		function initializeCachedCanvases(width, height) {
-			// Check if we need to resize
-			if (cachedCanvasWidth === width && cachedCanvasHeight === height && cachedMaskCanvases.length > 0) {
-				return; // Already initialized with correct size
-			}
-
-			cachedCanvasWidth = width;
-			cachedCanvasHeight = height;
-
-			// Create mask canvases for each depth slice
-			cachedMaskCanvases = [];
-			cachedMaskContexts = [];
-			for (let i = 0; i < DEPTH_SLICES; i++) {
-				const canvas = document.createElement('canvas');
-				canvas.width = width;
-				canvas.height = height;
-				cachedMaskCanvases.push(canvas);
-				cachedMaskContexts.push(canvas.getContext('2d', { willReadFrequently: false }));
-			}
-
-			// Create temp canvas for blurred video
-			cachedTempCanvas = document.createElement('canvas');
-			cachedTempCanvas.width = width;
-			cachedTempCanvas.height = height;
-			cachedTempContext = cachedTempCanvas.getContext('2d', { willReadFrequently: false });
-		}
-
-		// Apply depth-aware blur using layered rendering (uses cached canvases)
-		function applyDepthAwareBlur(video, canvas, depthData, diopters) {
-			if (!cachedMainContext) {
-				cachedMainContext = canvas.getContext('2d', { willReadFrequently: false });
-			}
-
-			if (!cachedMainContext || !depthData) {
-				// Fallback to uniform blur
-				applySimpleBlur(video, canvas, calculateBlur(diopters));
-				return;
-			}
-
-			const width = canvas.width;
-			const height = canvas.height;
-
-			// Initialize or resize cached canvases if needed
-			initializeCachedCanvases(width, height);
-
-			// Clear canvas
-			cachedMainContext.clearRect(0, 0, width, height);
-
-			// Render in depth slices (5 layers)
-			for (let i = 0; i < DEPTH_SLICES; i++) {
-				const minDepth = i / DEPTH_SLICES;
-				const maxDepth = (i + 1) / DEPTH_SLICES;
-				const avgDepth = (minDepth + maxDepth) / 2;
-
-				// Calculate blur for this depth slice
-				const blurPx = calculateDepthBlur(avgDepth, diopters);
-
-				// Draw video with blur to temp canvas
-				cachedTempContext.clearRect(0, 0, width, height);
-				cachedTempContext.filter = `blur(${blurPx}px)`;
-				cachedTempContext.drawImage(video, 0, 0, width, height);
-				cachedTempContext.filter = 'none';
-
-				// Create depth mask for this slice
-				const mask = createDepthMask(depthData, width, height, minDepth, maxDepth, i);
-
-				// Composite masked layer onto main canvas
-				cachedMainContext.save();
-				cachedMainContext.globalCompositeOperation = 'source-over';
-
-				// Use mask to only draw pixels in this depth range
-				cachedMainContext.drawImage(mask, 0, 0);
-				cachedMainContext.globalCompositeOperation = 'source-in';
-				cachedMainContext.drawImage(cachedTempCanvas, 0, 0);
-				cachedMainContext.globalCompositeOperation = 'source-over';
-				cachedMainContext.restore();
-			}
-		}
-
 		function updateEyeDisplay(display, diopters) {
 			display.textContent = diopters > 0 ? `-${diopters.toFixed(2)}` : '0.00';
-		}
-
-		// Update FPS counter
-		function updateFPS() {
-			fpsFrameCount++;
-			const now = performance.now();
-			const elapsed = now - fpsLastTime;
-
-			if (elapsed >= 1000) {
-				currentFPS = Math.round((fpsFrameCount * 1000) / elapsed);
-				fpsFrameCount = 0;
-				fpsLastTime = now;
-
-				if (fpsCounter) {
-					fpsCounter.textContent = `FPS: ${currentFPS}`;
-					fpsCounter.classList.toggle('low', currentFPS < 30);
-				}
-			}
 		}
 
 		function createVideoElement(src, isStream) {
@@ -795,43 +565,18 @@
 			console.log('startBlurRender called with video:', video, 'canvas:', canvas);
 			let renderCount = 0;
 
-			async function render() {
+			function render() {
 				if (renderCount < 3) {
 					console.log('Render loop', renderCount, '- readyState:', video.readyState, 'HAVE_CURRENT_DATA:', video.HAVE_CURRENT_DATA);
 					renderCount++;
 				}
 
 				if (video.readyState >= video.HAVE_CURRENT_DATA) {
-					frameCount++;
-
-					// Update depth map every DEPTH_FRAME_SKIP frames
-					if (useDepthEstimation && frameCount % DEPTH_FRAME_SKIP === 0) {
-						const newDepthMap = await getDepthMap(video);
-						if (newDepthMap) {
-							depthMap = newDepthMap;
-							lastDepthUpdate = frameCount;
-						}
-					}
-
-					// Get binocular diopters
-					const dominantDiopters = isDominantLeft ? leftDiopters : rightDiopters;
-					const nonDominantDiopters = isDominantLeft ? rightDiopters : leftDiopters;
-					const weightedDiopters = dominantDiopters * DOMINANT_WEIGHT + nonDominantDiopters * (1 - DOMINANT_WEIGHT);
-
-					// Apply depth-aware blur if available, otherwise fallback to uniform blur
-					if (useDepthEstimation && depthMap && (frameCount - lastDepthUpdate) < 30) {
-						applyDepthAwareBlur(video, canvas, depthMap, weightedDiopters);
-					} else {
-						const blurPx = calculateBlur(weightedDiopters);
-						applySimpleBlur(video, canvas, blurPx);
-					}
-
-					// Update FPS counter
-					updateFPS();
+					const blurPx = calculateBinocularBlur();
+					applySimpleBlur(video, canvas, blurPx);
 				} else if (renderCount < 3) {
 					console.log('Video not ready yet, skipping frame');
 				}
-
 				animationFrameId = requestAnimationFrame(render);
 			}
 			render();
@@ -934,7 +679,7 @@
 			updateBinocularVision();
 		}
 
-		async function init() {
+		function init() {
 			updateEyeDisplay(diopterLeftDisplay, 0);
 			updateEyeDisplay(diopterRightDisplay, 0);
 
@@ -951,9 +696,6 @@
 			dominantLeftBtn.addEventListener('click', () => setDominantEye(true));
 			dominantRightBtn.addEventListener('click', () => setDominantEye(false));
 
-			// Initialize depth estimation model
-			await initDepthModel();
-
 			navigator.mediaDevices?.getUserMedia ? initCamera() : useFallbackVideo();
 		}
 
@@ -964,10 +706,6 @@
 			}
 			if (mediaStream) {
 				mediaStream.getTracks().forEach(track => track.stop());
-			}
-			// Dispose TensorFlow.js resources
-			if (depthEstimator && depthEstimator.dispose) {
-				depthEstimator.dispose();
 			}
 		});
 
